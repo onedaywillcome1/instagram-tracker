@@ -1,0 +1,189 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import sys
+from instagram import instagram, utils
+import os
+import json
+import jinja2
+import tempfile
+import time
+import io
+import webbrowser
+import argparse
+import getpass
+
+ap = argparse.ArgumentParser()
+ap.add_argument("-u", "--username", required=True,
+                help="Instagram username")
+ap.add_argument("-p", "--password",
+                help="Instagram password")
+ap.add_argument("-t", "--template", default="basic",
+                help="Template name, name of file in templates directory")
+ap.add_argument("-f", "--feeds", default=5, type=int,
+                help="Number of feeds to scan (-1 means all of them)")
+ap.add_argument("-l", "--liker-size", default=10, type=int,
+                help="Number of likers to see in chart (-1 means all of them)")
+args = vars(ap.parse_args())
+
+dir_path = os.path.dirname(os.path.realpath(__file__))
+template_dir = os.path.join(dir_path, "templates")
+template = os.path.join(template_dir, args["template"] + ".html")
+
+if not os.path.exists(template):
+    print " - There is no template file named " + args["template"]
+    sys.exit(1)
+
+data_storage = {"likers": {}, "followers": {}, "followings": {}}
+last_data_storage = data_storage
+exist_last_data_storage = False
+file_name = args["username"] + ".json"
+
+if os.path.exists(file_name):
+    print " - Opening last result of application ({})...".format(file_name)
+    exist_last_data_storage = True
+    with open(file_name, 'r') as handler:
+        last_data_storage = json.load(handler)
+    print " - Done !"
+
+if args["password"] is None:
+    astr = getpass.getpass('Please type your instagram password: ')
+    try:
+        args["password"] = astr
+    except SystemExit:
+        print 'error occurred, while fetching password from keyboard'
+
+print " ~ Connecting to Instagram"
+connection = instagram.Instagram(args["username"], args["password"])
+if not connection.login():
+    print "Login failed"
+    sys.exit(2)
+print " ~ Connected."
+
+print " ~ Sending request to Instagram , fetching your feeds"
+next_max_id = ''
+result = connection.user_feed(connection.username_id)
+feeds = []
+feeds.extend(result["items"])
+while result["more_available"]:
+    next_max_id = result["next_max_id"]
+    result = connection.user_feed(connection.username_id, max_id=next_max_id)
+    feeds.extend(result["items"])
+print " ~ {} items fetched from Instagram.".format(len(feeds))
+
+selected_feeds = feeds[:args["feeds"]]
+for i, feed in enumerate(selected_feeds):
+    print " - Scanning media ({}/{}) {} ...".format((i + 1), len(selected_feeds), feed["id"])
+    likers = connection.media_likers(feed["id"])
+    for user in likers["users"]:
+        username = user["username"]
+        if username not in data_storage["likers"]:
+            data = {"count": 1, "name": user["full_name"], "username": username}
+            data_storage["likers"][username] = data
+        else:
+            data_storage["likers"][username]["count"] += 1
+    time.sleep(2)  # wait two second for instagram rate limiter !
+    print " - Media scanned, number of user scanned is {}.".format(len(likers["users"]))
+
+if args["liker_size"] > len(data_storage["likers"]):
+    print " - Error: liker_size is greater than real likers"
+    args["liker_size"] = len(data_storage["likers"])
+
+print " ~ Sending request to Instagram , fetching followers"
+next_max_id = ''
+result = connection.followers(connection.username_id)
+utils.list_to_dict(data_storage["followers"], result["users"], "username")
+while result["big_list"]:
+    next_max_id = result["next_max_id"]
+    result = connection.followers(connection.username_id, max_id=next_max_id)
+    time.sleep(1)  # wait one second for instagram rate limiter !
+    utils.list_to_dict(data_storage["followers"], result["users"], "username")
+print " ~ {} items fetched from Instagram.".format(len(data_storage["followers"]))
+
+print " ~ Sending request to Instagram , fetching followings"
+next_max_id = ''
+result = connection.followings(connection.username_id)
+utils.list_to_dict(data_storage["followings"], result["users"], "username")
+while result["big_list"]:
+    next_max_id = result["next_max_id"]
+    result = connection.followers(connection.username_id, max_id=next_max_id)
+    time.sleep(1)  # wait one second for instagram rate limiter !
+    utils.list_to_dict(data_storage["followings"], result["users"], "username")
+print " ~ {} items fetched from Instagram.".format(len(data_storage["followings"]))
+
+print " ~ Logging out ..."
+connection.logout()
+
+with open(file_name, 'w') as outfile:
+    print " - Saving result of application ({}) ...".format(file_name)
+    json.dump(data_storage, outfile)
+    print " - Data in {} is about your privacy ! Please note.".format(file_name)
+
+never_liked = []
+fans = {}
+for follower in data_storage["followers"]:
+    if follower not in data_storage["followings"]:
+        fans[follower] = data_storage["followers"][follower]
+
+    if follower not in data_storage["likers"]:
+        never_liked.append(follower)
+
+not_followed_back = {}
+for following in data_storage["followings"]:
+    if following not in data_storage["followers"]:
+        not_followed_back[following] = data_storage["followings"][following]
+
+print " - Totally '{}' people are not following you even though you follow them. These are:".format(len(not_followed_back))
+print " -",
+for username, value in not_followed_back.items():
+    print "{},".format(username),
+print
+
+new_followers = []
+new_followings = []
+new_unfollowers = []
+new_unfollowings = []
+
+if exist_last_data_storage:
+    new_unfollowers = list(set(last_data_storage["followers"]).difference(data_storage["followers"]))
+    new_unfollowings = list(set(last_data_storage["followings"]).difference(data_storage["followings"]))
+    new_followers = list(set(data_storage["followers"]).difference(last_data_storage["followers"]))
+    new_followings = list(set(data_storage["followings"]).difference(last_data_storage["followings"]))
+
+print " - New followers after last execution:{}".format(new_followers)
+print " - New followings after last execution:{}".format(new_followings)
+print " - New unfollowers after last execution:{}".format(new_unfollowers)
+print " - New unfollowings after last execution:{}".format(new_unfollowings)
+
+data_storage["likers"] = sorted(data_storage["likers"].values(), key=lambda x: x["count"], reverse=True)
+
+temporary_directory = tempfile.mktemp()
+if not os.path.exists(temporary_directory):
+    os.mkdir(temporary_directory)
+
+with open(template, 'r') as template_reader:
+    tpl = jinja2.Template(template_reader.read())
+
+output = tpl.render(user_info=connection.logged_in_user,
+                    followings=data_storage["followings"],
+                    followers=data_storage["followers"],
+                    new_followers=new_followers,
+                    new_followings=new_followings,
+                    new_unfollowers=new_unfollowers,
+                    new_unfollowings=new_unfollowings,
+                    likers=data_storage["likers"],
+                    never_liked=never_liked,
+                    feeds=feeds,
+                    fans=fans,
+                    not_followed_back=not_followed_back,
+                    last_followings_count=len(last_data_storage["followings"]),
+                    last_followers_count=len(last_data_storage["followers"]),
+                    liker_index=args["liker_size"])
+
+print " ~ Creating HTML file=> output.html"
+temporary_file = os.path.join(temporary_directory, 'output.html')
+with io.open(temporary_file, 'w', encoding='utf8') as f:
+    f.write(output)
+
+#webbrowser.open_new_tab(temporary_file)
+webbrowser.open('file://' + os.path.realpath(temporary_file))
